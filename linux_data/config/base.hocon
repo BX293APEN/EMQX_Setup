@@ -1,0 +1,38 @@
+## Define configurations that can later be overridden through UI/API/CLI.
+##
+## Config precedence order:
+##   etc/base.hocon < cluster.hocon < emqx.conf < environment variables
+
+## Logging configs
+## EMQX provides support for two primary log handlers: `file` and `console`,
+## with an additional `audit` handler specifically designed to always direct logs to files.
+## The system's default log handling behavior can be configured via the environment
+## variable `EMQX_DEFAULT_LOG_HANDLER`, which accepts the following settings:
+##  - `file`: Directs log output exclusively to files.
+##  - `console`: Channels log output solely to the console.
+## It's noteworthy that `EMQX_DEFAULT_LOG_HANDLER` is set to `file`
+## when EMQX is initiated via systemd `emqx.service` file.
+## In scenarios outside systemd initiation, `console` serves as the default log handler.
+## Read more about configs here: https://docs.emqx.com/en/enterprise/latest/configuration/logs.html
+log {
+    file {
+        # level = warning
+    }
+    console {
+        # level = warning
+    }
+}
+
+listeners.quic.default {
+    enabled = true
+    bind = "0.0.0.0:19080"
+    max_connections = 1024000
+    ssl_options {
+        keyfile = "/home/PEN/WS/cert/private.key"
+        certfile = "/home/PEN/WS/cert/certificate.crt"
+        # keypassword = "your_key_password" # 秘密鍵にパスワードがある場合
+        versions = [tlsv1.3]
+        verify = verify_none
+        ciphers = "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256"
+    }
+}
