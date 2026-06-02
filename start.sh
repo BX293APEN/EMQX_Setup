@@ -74,7 +74,7 @@ resolve_version() {
             log_err "最新バージョンの取得に失敗しました。Default にフォールバックします。"
             echo "Default"
         else
-            log "Latest バージョン解決: ${latest}"
+            log_err "Latest バージョン解決: ${latest}"
             echo "${latest}"
         fi
         return
@@ -173,7 +173,7 @@ get_build_versions_for_emqx() {
         elixir_raw=$(echo "${env_content}" | grep -oP 'ELIXIR_VSN=\K[^\s]+' | head -1)
 
         if [ -n "${otp_raw}" ] && [ -n "${elixir_raw}" ]; then
-            log "env.sh から取得: OTP=${otp_raw}, Elixir=${elixir_raw}"
+            log_err "env.sh から取得: OTP=${otp_raw}, Elixir=${elixir_raw}"
             echo "${otp_raw} ${elixir_raw}"
             return
         fi
@@ -407,10 +407,25 @@ source_build_install() {
     local src_dir="${PROGRAMS_DIR}/emqx-src-${emqx_ver}"
 
     if not_exist_directory "${src_dir}"; then
-        log "EMQX v${emqx_ver} をクローン中..."
+        log "EMQX ${emqx_ver} のソースを取得中..."
         local git_tag
         git_tag=$(get_git_tag "${emqx_ver}")
-        git clone --depth 1 --branch "${git_tag}" "${EMQX_OFFICIAL_REPO}" "${src_dir}"
+
+        # リリースタグはブランチとして存在しない場合があるため
+        # git clone --branch の代わりに tarball を使用する
+        # 例: 6.2.0    → https://github.com/emqx/emqx/archive/refs/tags/6.2.0.tar.gz
+        #     v5.8.9   → https://github.com/emqx/emqx/archive/refs/tags/v5.8.9.tar.gz
+        #     e5.10.4  → https://github.com/emqx/emqx/archive/refs/tags/e5.10.4.tar.gz
+        local tarball_url="https://github.com/emqx/emqx/archive/refs/tags/${git_tag}.tar.gz"
+        local tarball_file="${PROGRAMS_DIR}/emqx-${emqx_ver}.tar.gz"
+
+        log "tarball をダウンロード中: ${tarball_url}"
+        wget -q "${tarball_url}" -O "${tarball_file}"
+
+        log "tarball を展開中..."
+        mkdir -p "${src_dir}"
+        tar -xzf "${tarball_file}" -C "${src_dir}" --strip-components=1
+        rm -f "${tarball_file}"
         cd "${src_dir}"
 
         # ensure-rebar3.sh が存在する場合は専用 rebar3 を取得してから make する
