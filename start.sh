@@ -12,7 +12,7 @@ set -euo pipefail
 #                          ソースビルドでインストール
 #
 #   X.Y.Z                : 指定バージョンをソースビルドでインストール
-#                          タグが存在しない場合は Default にフォールバック
+#                          タグが存在しない場合は近似バージョンにフォールバック
 # ================================================================
 
 PROGRAMS_DIR="/home/PEN/WS/Programs"
@@ -44,12 +44,21 @@ make_and_move_working_directory() {
 #
 # Latest 取得ロジック:
 #   全タグから上記3形式の X.Y.Z 部分を抽出し semver 比較で最大値を返す。
-#   これにより v5.x / e5.x / 6.x が混在しても正しく最新を選択できる。
 #
-# ※ 旧実装の問題:
-#   grep -oP 'refs/tags/v\K...' は v プレフィックスのタグしか抽出できず、
-#   6.x 系タグ (例: 6.1.1) がヒットしないため Latest=5.8.9 と誤検出していた。
+# X.Y.Z 指定時のフォールバック:
+#   指定バージョンが見つからない場合、同じメジャー・マイナーの中で
+#   最も近い（最大の）パッチバージョンを検索する。
+#   同一マイナーも存在しない場合は同一メジャーの最新バージョンを使用する。
 # ================================================================
+
+# リモートから全バージョン番号(X.Y.Z形式)をソートして取得する共通関数
+fetch_all_versions() {
+    git ls-remote --tags "${EMQX_OFFICIAL_REPO}" \
+        | grep -oP 'refs/tags/(v|e)?\K[0-9]+\.[0-9]+\.[0-9]+$' \
+        | sort -t. -k1,1n -k2,2n -k3,3n \
+        | uniq
+}
+
 resolve_version() {
     local ver="${EMQX_VERSION:-Default}"
 
@@ -60,15 +69,12 @@ resolve_version() {
 
     if [ "${ver}" = "Latest" ]; then
         local latest
-        # v5.x.x / e5.x.x / 6.x.x の3形式すべてから X.Y.Z を抽出して最大値を得る
-        latest=$(git ls-remote --tags "${EMQX_OFFICIAL_REPO}" \
-                 | grep -oP 'refs/tags/(v|e)?\K[0-9]+\.[0-9]+\.[0-9]+$' \
-                 | sort -t. -k1,1n -k2,2n -k3,3n \
-                 | tail -1)
+        latest=$(fetch_all_versions | tail -1)
         if [ -z "${latest}" ]; then
             log_err "最新バージョンの取得に失敗しました。Default にフォールバックします。"
             echo "Default"
         else
+            log "Latest バージョン解決: ${latest}"
             echo "${latest}"
         fi
         return
@@ -76,7 +82,7 @@ resolve_version() {
 
     # X.Y.Z 形式チェック
     if echo "${ver}" | grep -qP '^\d+\.\d+\.\d+$'; then
-        # v プレフィックス / e プレフィックス / プレフィックスなし の3パターンを検索
+        # v / e / プレフィックスなし の3パターンを検索
         local tag_exists
         tag_exists=$(git ls-remote --tags "${EMQX_OFFICIAL_REPO}" \
                      "refs/tags/v${ver}" \
@@ -85,8 +91,49 @@ resolve_version() {
                      | wc -l)
         if [ "${tag_exists}" -gt 0 ]; then
             echo "${ver}"
+            return
+        fi
+
+        # ---- バージョンが見つからない: 近似バージョンを探す ----
+        log_err "バージョン ${ver} のタグが見つかりません。近似バージョンを検索します..."
+
+        local req_major req_minor req_patch
+        req_major=$(echo "${ver}" | cut -d. -f1)
+        req_minor=$(echo "${ver}" | cut -d. -f2)
+        req_patch=$(echo "${ver}" | cut -d. -f3)
+
+        local all_versions
+        all_versions=$(fetch_all_versions)
+
+        # 1) 同一メジャー・マイナーで最も近いパッチ(>=指定, なければ直前)を探す
+        local same_minor_versions
+        same_minor_versions=$(echo "${all_versions}" \
+            | grep -P "^${req_major}\.${req_minor}\.")
+
+        local closest=""
+        if [ -n "${same_minor_versions}" ]; then
+            # 指定パッチ以上で最小のもの(切り上げ)を優先
+            closest=$(echo "${same_minor_versions}" \
+                | awk -F. -v p="${req_patch}" '$3 >= p' \
+                | head -1)
+            # なければ同一マイナー内の最大パッチ(切り捨て)
+            if [ -z "${closest}" ]; then
+                closest=$(echo "${same_minor_versions}" | tail -1)
+            fi
+        fi
+
+        # 2) 同一マイナーも存在しない: 同一メジャーの最新バージョンを使用
+        if [ -z "${closest}" ]; then
+            closest=$(echo "${all_versions}" \
+                | grep -P "^${req_major}\." \
+                | tail -1)
+        fi
+
+        if [ -n "${closest}" ]; then
+            log_err "  -> ${ver} の近似バージョン ${closest} を使用します。"
+            echo "${closest}"
         else
-            log_err "バージョン ${ver} は見つかりませんでした。Default にフォールバックします。"
+            log_err "  -> 近似バージョンも見つかりません。Default にフォールバックします。"
             echo "Default"
         fi
         return
@@ -97,39 +144,63 @@ resolve_version() {
 }
 
 # ================================================================
-# EMQX バージョンに対応する OTP バージョンを返す
+# env.sh から OTP / Elixir バージョンを取得する
 #
-# 対応表 (EMQX 公式 .tool-versions / リリースノート準拠):
-#   5.0–5.1  : OTP 24.x  → 24.3.4.17
-#   5.2–5.3  : OTP 25.x  → 25.3.2.20
-#   5.4–5.10 : OTP 26.x  → 26.2.5.14
-#   6.0      : OTP 27.x  → 27.3.4
-#   6.1+     : OTP 28.x  → 28.0
-#     ※ EMQX 6.1.0 リリースノート #16368 にて OTP27→OTP28 移行が明記されている
+# EMQX 5.8 以降はリポジトリに env.sh が存在し正確なバージョンが記載される。
+# env.sh が存在しない (5.7以前) 場合は静的対応表にフォールバックする。
 #
-# 公式パッケージは OTP を同梱するためこの関数は使わない。
-# ソースビルド時 (source_build_install) に使用する。
+# env.sh の OTP_VSN は "26.2.5.14-1" のようなビルド番号付き形式のため、
+# ハイフン以降を除去して純粋な OTP バージョン番号として扱う。
 # ================================================================
-get_otp_version_for_emqx() {
+get_build_versions_for_emqx() {
     local emqx_ver="$1"
     local major minor
     major=$(echo "${emqx_ver}" | cut -d. -f1)
     minor=$(echo "${emqx_ver}" | cut -d. -f2)
 
+    local git_tag
+    git_tag=$(get_git_tag "${emqx_ver}")
+
+    # env.sh からの取得を試みる
+    local env_sh_url="https://raw.githubusercontent.com/emqx/emqx/${git_tag}/env.sh"
+    local env_content
+    env_content=$(curl -sf "${env_sh_url}" 2>/dev/null || true)
+
+    if [ -n "${env_content}" ]; then
+        # OTP_VSN: "28.4.1-1" → "28.4.1"
+        local otp_raw elixir_raw
+        otp_raw=$(echo "${env_content}" | grep -oP 'OTP_VSN=\K[^\s]+' | head -1 | cut -d- -f1)
+        elixir_raw=$(echo "${env_content}" | grep -oP 'ELIXIR_VSN=\K[^\s]+' | head -1)
+
+        if [ -n "${otp_raw}" ] && [ -n "${elixir_raw}" ]; then
+            log "env.sh から取得: OTP=${otp_raw}, Elixir=${elixir_raw}"
+            echo "${otp_raw} ${elixir_raw}"
+            return
+        fi
+    fi
+
+    # env.sh が存在しない / 取得失敗 → 静的対応表にフォールバック
+    log_err "env.sh の取得失敗。静的対応表を使用します (EMQX ${emqx_ver})"
+
+    local otp_ver elixir_ver
     if [ "${major}" -eq 5 ]; then
-        if   [ "${minor}" -le 1 ]; then echo "24.3.4.17"
-        elif [ "${minor}" -le 3 ]; then echo "25.3.2.20"
-        else                            echo "26.2.5.14"
+        if   [ "${minor}" -le 1 ]; then otp_ver="24.3.4.17";  elixir_ver=""
+        elif [ "${minor}" -le 3 ]; then otp_ver="25.3.2.20";  elixir_ver=""
+        elif [ "${minor}" -le 7 ]; then otp_ver="26.2.5.2";   elixir_ver="1.15.7"
+        else                            otp_ver="26.2.5.14";  elixir_ver="1.15.7"
         fi
     elif [ "${major}" -eq 6 ]; then
-        if   [ "${minor}" -eq 0 ]; then echo "27.3.4"
-        else                            echo "28.0"
+        if   [ "${minor}" -eq 0 ]; then otp_ver="27.3.4.2";   elixir_ver="1.18.3"
+        elif [ "${minor}" -eq 1 ]; then otp_ver="28.2";       elixir_ver="1.19.1"
+        else                            otp_ver="28.4.1";     elixir_ver="1.19.1"
         fi
     else
-        # 未知のメジャーバージョンは最新の確認済み OTP を使う
-        log_err "未知のメジャーバージョン ${major}。OTP 28.0 を使用します。"
-        echo "28.0"
+        log_err "未知のメジャーバージョン ${major}。OTP 28.4.1 / Elixir 1.19.1 を使用します。"
+        otp_ver="28.4.1"
+        elixir_ver="1.19.1"
     fi
+
+    echo "${otp_ver} ${elixir_ver}"
 }
 
 # ================================================================
@@ -158,8 +229,6 @@ get_git_tag() {
 #
 # OTP の ODBC アプリケーションを有効化するために必要。
 # OTP configure が unixODBC を参照するため、build_otp より先に呼ぶこと。
-# unixODBC の API (SQLAllocHandle 等) は 2.3.x 系で安定しており
-# OTP の要求するインターフェースとの互換性に問題はない。
 # ================================================================
 build_unixodbc() {
     local unixodbc_ver="$1"
@@ -182,7 +251,7 @@ build_unixodbc() {
 
 # ================================================================
 # OTP ソースビルド  ※ ソースビルドルート専用
-#   $1: OTP バージョン (例: 27.2.3)
+#   $1: OTP バージョン (例: 27.3.4.2)
 #
 # build_unixodbc() の後に呼ぶこと (--enable-odbc が unixODBC を参照するため)。
 # ================================================================
@@ -211,6 +280,51 @@ build_otp() {
     make install
     erl -noshell -eval "application:load(odbc), application:start(odbc), halt()."
     log "Erlang/OTP ${otp_ver} インストール完了"
+}
+
+# ================================================================
+# Elixir インストール  ※ ソースビルドルート専用
+#   $1: Elixir バージョン (例: 1.19.1)
+#
+# EMQX のビルドシステムが mix を使うため必須。
+# build_otp() の後に呼ぶこと (Elixir は OTP に依存するため)。
+#
+# インストール方法:
+#   GitHub リリースから precompiled バイナリ (elixir-otp-XX.zip) を取得。
+#   OTP メジャーバージョンに対応した zip を選択する。
+#   /usr/local/elixir に展開し PATH に追加する。
+# ================================================================
+install_elixir() {
+    local elixir_ver="$1"
+    local otp_ver="$2"
+
+    log "=== Elixir ${elixir_ver} のインストール ==="
+
+    # OTP メジャーバージョン (例: 28.4.1 → 28)
+    local otp_major
+    otp_major=$(echo "${otp_ver}" | cut -d. -f1)
+
+    local elixir_zip="elixir-otp-${otp_major}.zip"
+    local elixir_url="https://github.com/elixir-lang/elixir/releases/download/v${elixir_ver}/${elixir_zip}"
+    local install_dir="/usr/local/elixir"
+
+    cd "${PROGRAMS_DIR}"
+
+    if not_exist_directory "${install_dir}"; then
+        log "Elixir ${elixir_ver} (OTP ${otp_major} 向け) をダウンロード中..."
+        wget -q "${elixir_url}" -O "${elixir_zip}"
+        mkdir -p "${install_dir}"
+        unzip -q "${elixir_zip}" -d "${install_dir}"
+        rm -f "${elixir_zip}"
+    fi
+
+    # PATH に追加 (既に追加済みでも冪等)
+    export PATH="${install_dir}/bin:${PATH}"
+
+    # 確認
+    local installed_ver
+    installed_ver=$(elixir --version 2>&1 | grep -oP 'Elixir \K[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+    log "Elixir ${installed_ver} インストール完了 (PATH: ${install_dir}/bin)"
 }
 
 # ================================================================
@@ -254,34 +368,40 @@ default_install() {
 #   $1: EMQX バージョン (X.Y.Z)
 #
 # Latest / X.Y.Z 指定時のビルド先。
-# get_otp_version_for_emqx で指定 EMQX に対応する OTP を選択し
+# get_build_versions_for_emqx で指定 EMQX に対応する OTP / Elixir を決定し
 # 公式リポジトリからソースをビルドする。
-# unixODBC は OTP の ODBC アプリが要求するインターフェースが
-# 2.3.x 系で安定しているため、バージョンに関わらず 2.3.12 を使用する。
+#
+# Elixir について:
+#   EMQX 5.8 以降はビルドシステムに mix が必要。
+#   env.sh から ELIXIR_VSN を取得し、OTP ビルド後にインストールする。
+#   ELIXIR_VSN が空の場合 (5.0–5.3) は Elixir インストールをスキップする。
 #
 # ensure-rebar3.sh について:
 #   EMQX 5.4 以降はリポジトリ内に scripts/ensure-rebar3.sh が含まれており、
 #   これを使って EMQX 専用バージョンの rebar3 を取得する必要がある。
-#   システムの rebar3 (apt でインストール済み) を使うと依存プラグインの
-#   バージョン互換性エラーが発生する場合があるため、スクリプトが存在する場合は
-#   必ず ensure-rebar3.sh を先に実行してから make を呼ぶこと。
+#   システムの rebar3 を使うと依存プラグインのバージョン互換性エラーが発生する。
 #   5.0–5.3 では ensure-rebar3.sh が存在しないため、この処理はスキップされる。
-#
-# コンパイラについて:
-#   emqx-builder (公式 CI イメージ) は特定の gcc バージョンを強制していない
-#   (Ubuntu 18.04 + OTP24 の特殊ケースを除く)。
-#   Default ビルドに合わせて CC=gcc-12 CXX=g++-12 を使用する。
 # ================================================================
 source_build_install() {
     local emqx_ver="$1"
-    local otp_ver
-    otp_ver=$(get_otp_version_for_emqx "${emqx_ver}")
 
-    log "=== ソースビルド: EMQX ${emqx_ver} / OTP ${otp_ver} ==="
+    # OTP / Elixir バージョンを取得 (スペース区切り: "OTP_VER ELIXIR_VER")
+    local build_versions
+    build_versions=$(get_build_versions_for_emqx "${emqx_ver}")
+    local otp_ver elixir_ver
+    otp_ver=$(echo "${build_versions}" | cut -d' ' -f1)
+    elixir_ver=$(echo "${build_versions}" | cut -d' ' -f2)
 
-    # unixODBC → OTP の順でビルド
+    log "=== ソースビルド: EMQX ${emqx_ver} / OTP ${otp_ver} / Elixir ${elixir_ver:-なし} ==="
+
+    # unixODBC → OTP → Elixir の順でビルド/インストール
     build_unixodbc "${DEFAULT_UNIXODBC_VERSION}"
     build_otp "${otp_ver}"
+
+    # Elixir が必要な場合のみインストール (5.4 以降)
+    if [ -n "${elixir_ver}" ]; then
+        install_elixir "${elixir_ver}" "${otp_ver}"
+    fi
 
     cd "${PROGRAMS_DIR}"
     local src_dir="${PROGRAMS_DIR}/emqx-src-${emqx_ver}"
@@ -337,16 +457,6 @@ setup_config_and_certs() {
 ##   etc/base.hocon < cluster.hocon < emqx.conf < environment variables
 
 ## Logging configs
-## EMQX provides support for two primary log handlers: `file` and `console`,
-## with an additional `audit` handler specifically designed to always direct logs to files.
-## The system's default log handling behavior can be configured via the environment
-## variable `EMQX_DEFAULT_LOG_HANDLER`, which accepts the following settings:
-##  - `file`: Directs log output exclusively to files.
-##  - `console`: Channels log output solely to the console.
-## It's noteworthy that `EMQX_DEFAULT_LOG_HANDLER` is set to `file`
-## when EMQX is initiated via systemd `emqx.service` file.
-## In scenarios outside systemd initiation, `console` serves as the default log handler.
-## Read more about configs here: https://docs.emqx.com/en/enterprise/latest/configuration/logs.html
 log {
     file {
         # level = warning
