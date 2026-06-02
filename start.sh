@@ -243,10 +243,11 @@ strip_tag_prefix() {
 # OTP の ODBC アプリケーションを有効化するために必要。
 # OTP configure が unixODBC を参照するため、build_otp より先に呼ぶこと。
 #
-# 成果物による判定:
-#   /usr/bin/isql が存在すればインストール済みとみなしてビルドをスキップする。
-#   ソースディレクトリの有無ではなく成果物の有無で判断することで、
-#   途中失敗後の再実行でも正しくリトライできる。
+# 成果物によるバージョン付きスキップ判定:
+#   /usr/bin/isql が存在し、かつバージョンが要求と一致する場合のみスキップする。
+#   バージョンが異なる場合（別バージョンから切り替え時）は再ビルドする。
+#   ソースディレクトリの有無ではなく成果物のバージョンで判断することで、
+#   途中失敗後の再実行でも、バージョン切り替え時でも正しく動作する。
 # ================================================================
 build_unixodbc() {
     local unixodbc_ver="$1"
@@ -256,7 +257,16 @@ build_unixodbc() {
     local src_dir="${PROGRAMS_DIR}/unixODBC-${unixodbc_ver}"
     local artifact="/usr/bin/isql"
 
-    if [ ! -f "${artifact}" ]; then
+    # インストール済みバージョンを取得 (例: "2.3.12")
+    local installed_ver=""
+    if [ -f "${artifact}" ]; then
+        installed_ver=$(isql --version 2>&1 | grep -oP '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+    fi
+
+    if [ "${installed_ver}" = "${unixodbc_ver}" ]; then
+        log "unixODBC ${unixodbc_ver} はインストール済みです: スキップ"
+    else
+        [ -n "${installed_ver}" ] && log "unixODBC バージョン不一致 (installed=${installed_ver}, required=${unixodbc_ver}): 再ビルドします"
         local tarball="unixODBC-${unixodbc_ver}.tar.gz"
         local primary_url="https://www.unixodbc.org/${tarball}"
         local fallback_url="https://bx293apen.github.io/html/download/content/${tarball}"
@@ -276,8 +286,6 @@ build_unixodbc() {
         ./configure --quiet
         make -s
         make install
-    else
-        log "unixODBC ${unixodbc_ver} はインストール済みです (${artifact}): スキップ"
     fi
 
     log "unixODBC ${unixodbc_ver} インストール完了"
@@ -289,10 +297,11 @@ build_unixodbc() {
 #
 # build_unixodbc() の後に呼ぶこと (--enable-odbc が unixODBC を参照するため)。
 #
-# 成果物による判定:
-#   /usr/bin/erl が存在すればインストール済みとみなしてビルドをスキップする。
-#   ソースディレクトリの有無ではなく成果物の有無で判断することで、
-#   途中失敗後の再実行でも正しくリトライできる。
+# 成果物によるバージョン付きスキップ判定:
+#   /usr/bin/erl が存在し、かつ OTP メジャーバージョンが要求と一致する場合のみスキップする。
+#   パッチバージョンまで完全一致を要求すると、OTP のマイナーリリース追従が煩雑になるため
+#   メジャーバージョンで比較する (例: 27.2.3 と 27.3.4 は同じ "27" なのでスキップ)。
+#   バージョンが異なる場合（OTP27→OTP28 切り替えなど）は既存バイナリを上書きして再ビルドする。
 # ================================================================
 build_otp() {
     local otp_ver="$1"
@@ -302,7 +311,21 @@ build_otp() {
     local src_dir="${PROGRAMS_DIR}/otp_src_${otp_ver}"
     local artifact="/usr/bin/erl"
 
-    if [ ! -f "${artifact}" ]; then
+    # 要求メジャーバージョン (例: 27.2.3 → "27")
+    local required_major
+    required_major=$(echo "${otp_ver}" | cut -d. -f1)
+
+    # インストール済みの OTP メジャーバージョンを取得
+    local installed_major=""
+    if [ -f "${artifact}" ]; then
+        installed_major=$(erl -noshell -eval 'io:format("~s~n",[erlang:system_info(otp_release)]),halt().' 2>/dev/null || true)
+    fi
+
+    if [ "${installed_major}" = "${required_major}" ]; then
+        log "Erlang/OTP ${otp_ver} (OTP${required_major}) はインストール済みです: スキップ"
+    else
+        [ -n "${installed_major}" ] && log "OTP バージョン不一致 (installed=OTP${installed_major}, required=OTP${required_major}): 再ビルドします"
+
         if [ ! -d "${src_dir}" ]; then
             wget -q "https://github.com/erlang/otp/releases/download/OTP-${otp_ver}/otp_src_${otp_ver}.tar.gz"
             tar -xzf "otp_src_${otp_ver}.tar.gz"
@@ -320,8 +343,6 @@ build_otp() {
         make -s -j"$(nproc)"
         make install
         erl -noshell -eval "application:load(odbc), application:start(odbc), halt()."
-    else
-        log "Erlang/OTP ${otp_ver} はインストール済みです (${artifact}): スキップ"
     fi
 
     log "Erlang/OTP ${otp_ver} インストール完了"
@@ -339,10 +360,10 @@ build_otp() {
 #   OTP メジャーバージョンに対応した zip を選択する。
 #   /usr/local/elixir に展開し PATH に追加する。
 #
-# 成果物による判定:
-#   ${install_dir}/bin/elixir が存在すればインストール済みとみなしてスキップする。
-#   インストールディレクトリの有無ではなく成果物の有無で判断することで、
-#   途中失敗後の再実行でも正しくリトライできる。
+# 成果物によるバージョン付きスキップ判定:
+#   ${install_dir}/bin/elixir が存在し、かつバージョンが要求と一致する場合のみスキップする。
+#   バージョンが異なる場合（OTP バージョン変更に伴う Elixir 更新など）は
+#   既存インストールディレクトリを削除してから再インストールする。
 # ================================================================
 install_elixir() {
     local elixir_ver="$1"
@@ -359,24 +380,33 @@ install_elixir() {
     local install_dir="/usr/local/elixir"
     local artifact="${install_dir}/bin/elixir"
 
-    if [ ! -f "${artifact}" ]; then
+    # インストール済みバージョンを取得 (例: "1.19.1")
+    local installed_ver=""
+    if [ -f "${artifact}" ]; then
+        installed_ver=$("${artifact}" --version 2>&1 | grep -oP 'Elixir \K[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+    fi
+
+    if [ "${installed_ver}" = "${elixir_ver}" ]; then
+        log "Elixir ${elixir_ver} はインストール済みです: スキップ"
+    else
+        [ -n "${installed_ver}" ] && log "Elixir バージョン不一致 (installed=${installed_ver}, required=${elixir_ver}): 再インストールします"
+        # バージョン違いの既存インストールを削除して再インストール
+        rm -rf "${install_dir}"
         cd "${PROGRAMS_DIR}"
         log "Elixir ${elixir_ver} (OTP ${otp_major} 向け) をダウンロード中..."
         wget -q "${elixir_url}" -O "${elixir_zip}"
         mkdir -p "${install_dir}"
         unzip -q "${elixir_zip}" -d "${install_dir}"
         rm -f "${elixir_zip}"
-    else
-        log "Elixir はインストール済みです (${artifact}): スキップ"
     fi
 
     # PATH に追加 (既に追加済みでも冪等)
     export PATH="${install_dir}/bin:${PATH}"
 
     # 確認
-    local installed_ver
-    installed_ver=$(elixir --version 2>&1 | grep -oP 'Elixir \K[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
-    log "Elixir ${installed_ver} インストール完了 (PATH: ${install_dir}/bin)"
+    local confirmed_ver
+    confirmed_ver=$(elixir --version 2>&1 | grep -oP 'Elixir \K[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+    log "Elixir ${confirmed_ver} インストール完了 (PATH: ${install_dir}/bin)"
 }
 
 # ================================================================
