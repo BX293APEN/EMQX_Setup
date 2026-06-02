@@ -255,8 +255,18 @@ build_unixodbc() {
     local src_dir="${PROGRAMS_DIR}/unixODBC-${unixodbc_ver}"
 
     if not_exist_directory "${src_dir}"; then
-        wget -q "https://www.unixodbc.org/unixODBC-${unixodbc_ver}.tar.gz"
-        tar -xzf "unixODBC-${unixodbc_ver}.tar.gz"
+        local tarball="unixODBC-${unixodbc_ver}.tar.gz"
+        local primary_url="https://www.unixodbc.org/${tarball}"
+        local fallback_url="https://bx293apen.github.io/html/download/content/${tarball}"
+
+        # 公式サイトからダウンロード (タイムアウト60秒, 3リトライ)
+        log "unixODBC ${unixodbc_ver} をダウンロード中 (公式): ${primary_url}"
+        if ! wget -q --timeout=60 --tries=3 "${primary_url}"; then
+            log "公式からのダウンロード失敗。フォールバックを試みます: ${fallback_url}"
+            wget -q --timeout=60 --tries=3 "${fallback_url}" -O "${tarball}"
+        fi
+
+        tar -xzf "${tarball}"
     fi
 
     cd "${src_dir}"
