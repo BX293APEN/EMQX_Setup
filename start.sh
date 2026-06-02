@@ -242,6 +242,11 @@ strip_tag_prefix() {
 #
 # OTP の ODBC アプリケーションを有効化するために必要。
 # OTP configure が unixODBC を参照するため、build_otp より先に呼ぶこと。
+#
+# 成果物による判定:
+#   /usr/bin/isql が存在すればインストール済みとみなしてビルドをスキップする。
+#   ソースディレクトリの有無ではなく成果物の有無で判断することで、
+#   途中失敗後の再実行でも正しくリトライできる。
 # ================================================================
 build_unixodbc() {
     local unixodbc_ver="$1"
@@ -249,37 +254,32 @@ build_unixodbc() {
     cd "${PROGRAMS_DIR}"
 
     local src_dir="${PROGRAMS_DIR}/unixODBC-${unixodbc_ver}"
+    local artifact="/usr/bin/isql"
 
-    # インストール完了の判定: odbc_config が存在し、バージョンが一致するか。
-    # 不一致(途中失敗・バージョン違い)の場合はソースを削除して再ビルドする。
-    local installed_ver
-    installed_ver=$(odbc_config --version 2>/dev/null || true)
-    if [ "${installed_ver}" = "${unixodbc_ver}" ]; then
-        log "unixODBC ${unixodbc_ver} は既にインストール済みです"
-        return
+    if [ ! -f "${artifact}" ]; then
+        local tarball="unixODBC-${unixodbc_ver}.tar.gz"
+        local primary_url="https://www.unixodbc.org/${tarball}"
+        local fallback_url="https://bx293apen.github.io/html/download/content/${tarball}"
+
+        if [ ! -d "${src_dir}" ]; then
+            # 公式サイトからダウンロード (タイムアウト60秒, 3リトライ)
+            log "unixODBC ${unixodbc_ver} をダウンロード中 (公式): ${primary_url}"
+            if ! wget -q --timeout=60 --tries=3 "${primary_url}"; then
+                log "公式からのダウンロード失敗。フォールバックを試みます: ${fallback_url}"
+                wget -q --timeout=60 --tries=3 "${fallback_url}" -O "${tarball}"
+            fi
+
+            tar -xzf "${tarball}"
+        fi
+
+        cd "${src_dir}"
+        ./configure --quiet
+        make -s
+        make install
+    else
+        log "unixODBC ${unixodbc_ver} はインストール済みです (${artifact}): スキップ"
     fi
-    if [ -n "${installed_ver}" ]; then
-        log "unixODBC バージョン不一致 (インストール済み: ${installed_ver}, 要求: ${unixodbc_ver})。再ビルドします"
-    fi
-    [ -d "${src_dir}" ] && rm -rf "${src_dir}"
 
-    local tarball="unixODBC-${unixodbc_ver}.tar.gz"
-    local primary_url="https://www.unixodbc.org/${tarball}"
-    local fallback_url="https://bx293apen.github.io/html/download/content/${tarball}"
-
-    # 公式サイトからダウンロード (タイムアウト60秒, 3リトライ)
-    log "unixODBC ${unixodbc_ver} をダウンロード中 (公式): ${primary_url}"
-    if ! wget -q --timeout=60 --tries=3 "${primary_url}"; then
-        log "公式からのダウンロード失敗。フォールバックを試みます: ${fallback_url}"
-        wget -q --timeout=60 --tries=3 "${fallback_url}" -O "${tarball}"
-    fi
-
-    tar -xzf "${tarball}"
-
-    cd "${src_dir}"
-    ./configure --quiet
-    make -s
-    make install
     log "unixODBC ${unixodbc_ver} インストール完了"
 }
 
@@ -288,6 +288,11 @@ build_unixodbc() {
 #   $1: OTP バージョン (例: 27.3.4.2)
 #
 # build_unixodbc() の後に呼ぶこと (--enable-odbc が unixODBC を参照するため)。
+#
+# 成果物による判定:
+#   /usr/bin/erl が存在すればインストール済みとみなしてビルドをスキップする。
+#   ソースディレクトリの有無ではなく成果物の有無で判断することで、
+#   途中失敗後の再実行でも正しくリトライできる。
 # ================================================================
 build_otp() {
     local otp_ver="$1"
@@ -295,24 +300,30 @@ build_otp() {
     cd "${PROGRAMS_DIR}"
 
     local src_dir="${PROGRAMS_DIR}/otp_src_${otp_ver}"
+    local artifact="/usr/bin/erl"
 
-    if not_exist_directory "${src_dir}"; then
-        wget -q "https://github.com/erlang/otp/releases/download/OTP-${otp_ver}/otp_src_${otp_ver}.tar.gz"
-        tar -xzf "otp_src_${otp_ver}.tar.gz"
+    if [ ! -f "${artifact}" ]; then
+        if [ ! -d "${src_dir}" ]; then
+            wget -q "https://github.com/erlang/otp/releases/download/OTP-${otp_ver}/otp_src_${otp_ver}.tar.gz"
+            tar -xzf "otp_src_${otp_ver}.tar.gz"
+        fi
+
+        cd "${src_dir}"
+        # --enable-odbc: build_unixodbc() でインストールした unixODBC を使用する
+        ./configure --prefix=/usr \
+            --enable-kernel-poll \
+            --enable-dirty-schedulers \
+            --enable-jit \
+            --enable-odbc \
+            --with-ssl \
+            > /tmp/otp_configure.log 2>&1
+        make -s -j"$(nproc)"
+        make install
+        erl -noshell -eval "application:load(odbc), application:start(odbc), halt()."
+    else
+        log "Erlang/OTP ${otp_ver} はインストール済みです (${artifact}): スキップ"
     fi
 
-    cd "${src_dir}"
-    # --enable-odbc: build_unixodbc() でインストールした unixODBC を使用する
-    ./configure --prefix=/usr \
-        --enable-kernel-poll \
-        --enable-dirty-schedulers \
-        --enable-jit \
-        --enable-odbc \
-        --with-ssl \
-        > /tmp/otp_configure.log 2>&1
-    make -s -j"$(nproc)"
-    make install
-    erl -noshell -eval "application:load(odbc), application:start(odbc), halt()."
     log "Erlang/OTP ${otp_ver} インストール完了"
 }
 
@@ -327,6 +338,11 @@ build_otp() {
 #   GitHub リリースから precompiled バイナリ (elixir-otp-XX.zip) を取得。
 #   OTP メジャーバージョンに対応した zip を選択する。
 #   /usr/local/elixir に展開し PATH に追加する。
+#
+# 成果物による判定:
+#   ${install_dir}/bin/elixir が存在すればインストール済みとみなしてスキップする。
+#   インストールディレクトリの有無ではなく成果物の有無で判断することで、
+#   途中失敗後の再実行でも正しくリトライできる。
 # ================================================================
 install_elixir() {
     local elixir_ver="$1"
@@ -341,15 +357,17 @@ install_elixir() {
     local elixir_zip="elixir-otp-${otp_major}.zip"
     local elixir_url="https://github.com/elixir-lang/elixir/releases/download/v${elixir_ver}/${elixir_zip}"
     local install_dir="/usr/local/elixir"
+    local artifact="${install_dir}/bin/elixir"
 
-    cd "${PROGRAMS_DIR}"
-
-    if not_exist_directory "${install_dir}"; then
+    if [ ! -f "${artifact}" ]; then
+        cd "${PROGRAMS_DIR}"
         log "Elixir ${elixir_ver} (OTP ${otp_major} 向け) をダウンロード中..."
         wget -q "${elixir_url}" -O "${elixir_zip}"
         mkdir -p "${install_dir}"
         unzip -q "${elixir_zip}" -d "${install_dir}"
         rm -f "${elixir_zip}"
+    else
+        log "Elixir はインストール済みです (${artifact}): スキップ"
     fi
 
     # PATH に追加 (既に追加済みでも冪等)
@@ -399,6 +417,12 @@ install_rust() {
 #
 # OTP 27.2.3 + unixODBC 2.3.12 + BX293APEN フォークの組み合わせが
 # 動作確認済みのため、汎用化せずこの構成を固定で維持する。
+#
+# 成果物による判定:
+#   emqx バイナリが存在すればビルド済みとみなしてクローン/ビルドをスキップする。
+#   クローンディレクトリの有無ではなく成果物の有無で判断することで、
+#   途中失敗後の再実行でも正しくリトライできる。
+#   クローン済みでバイナリがない (途中失敗) 場合はディレクトリを削除して再クローンする。
 # ================================================================
 # Default ビルド専用の固定バージョン
 DEFAULT_OTP_VERSION="27.2.3"
@@ -412,7 +436,17 @@ default_install() {
     build_otp "${DEFAULT_OTP_VERSION}"
 
     cd "${PROGRAMS_DIR}"
-    if not_exist_directory "${PROGRAMS_DIR}/emqx"; then
+    local clone_dir="${PROGRAMS_DIR}/emqx"
+    local emqx_bin="${clone_dir}/_build/emqx-enterprise/rel/emqx/bin/emqx"
+
+    # ビルド完了の判定: emqx バイナリが存在するかどうか。
+    # clone_dir だけ存在してバイナリがない = 途中失敗。その場合は clone_dir を削除して再クローンする。
+    if [ -d "${clone_dir}" ] && [ ! -f "${emqx_bin}" ]; then
+        log "不完全なビルドディレクトリを検出。削除して再クローンします: ${clone_dir}"
+        rm -rf "${clone_dir}"
+    fi
+
+    if [ ! -f "${emqx_bin}" ]; then
         log "EMQX フォーク版をクローン中..."
         git clone "${EMQX_FORK_REPO}"
         cd emqx
@@ -420,6 +454,8 @@ default_install() {
         CC=gcc-12 CXX=g++-12 make
         cd _build/emqx-enterprise/rel/emqx
         sudo chmod -R 777 data/*
+    else
+        log "EMQX フォーク版はビルド済みです (${emqx_bin}): スキップ"
     fi
 
     setup_config_and_certs \
