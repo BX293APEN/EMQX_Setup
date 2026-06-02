@@ -51,12 +51,21 @@ make_and_move_working_directory() {
 #   同一マイナーも存在しない場合は同一メジャーの最新バージョンを使用する。
 # ================================================================
 
-# リモートから全バージョン番号(X.Y.Z形式)をソートして取得する共通関数
+# リモートから安定版のフルタグ名をソートして取得する共通関数
+# 出力形式: フルタグ名そのまま (例: "v5.8.9", "e5.10.4", "6.2.0")
+# X.Y.Z 部分のみで semver ソートするため、プレフィックスを一時除去してソート後に復元する
 fetch_all_versions() {
     git ls-remote --tags "${EMQX_OFFICIAL_REPO}" \
-        | grep -oP 'refs/tags/(v|e)?\K[0-9]+\.[0-9]+\.[0-9]+$' \
+        | grep -oP 'refs/tags/\K(v|e)?[0-9]+\.[0-9]+\.[0-9]+$' \
+        | grep -vP '[-](alpha|beta|rc|patch|hotfix|build|ft)\.' \
+        | awk '{
+            tag = $0
+            ver = tag
+            sub(/^[ve]/, "", ver)
+            print ver "\t" tag
+          }' \
         | sort -t. -k1,1n -k2,2n -k3,3n \
-        | uniq
+        | cut -f2
 }
 
 resolve_version() {
@@ -82,15 +91,17 @@ resolve_version() {
 
     # X.Y.Z 形式チェック
     if echo "${ver}" | grep -qP '^\d+\.\d+\.\d+$'; then
-        # v / e / プレフィックスなし の3パターンを検索
-        local tag_exists
-        tag_exists=$(git ls-remote --tags "${EMQX_OFFICIAL_REPO}" \
+        # v / e / プレフィックスなし の3パターンを検索し、存在するフルタグを返す
+        local matched_tag
+        matched_tag=$(git ls-remote --tags "${EMQX_OFFICIAL_REPO}" \
                      "refs/tags/v${ver}" \
                      "refs/tags/e${ver}" \
                      "refs/tags/${ver}" \
-                     | wc -l)
-        if [ "${tag_exists}" -gt 0 ]; then
-            echo "${ver}"
+                     | grep -v '\^{}' \
+                     | grep -oP 'refs/tags/\K.*' \
+                     | head -1)
+        if [ -n "${matched_tag}" ]; then
+            echo "${matched_tag}"
             return
         fi
 
@@ -105,16 +116,28 @@ resolve_version() {
         local all_versions
         all_versions=$(fetch_all_versions)
 
+        # fetch_all_versions はフルタグ (例: "v5.8.9", "e5.10.4", "6.2.0") を返す。
+        # grep でのメジャー・マイナー一致には X.Y. 部分のみで比較する。
+        # awk の semver 比較もプレフィックスを除去してから行う。
+
         # 1) 同一メジャー・マイナーで最も近いパッチ(>=指定, なければ直前)を探す
         local same_minor_versions
         same_minor_versions=$(echo "${all_versions}" \
-            | grep -P "^${req_major}\.${req_minor}\.")
+            | awk -v maj="${req_major}" -v min="${req_minor}" '{
+                ver = $0; sub(/^[ve]/, "", ver)
+                split(ver, a, ".")
+                if (a[1] == maj && a[2] == min) print $0
+              }')
 
         local closest=""
         if [ -n "${same_minor_versions}" ]; then
             # 指定パッチ以上で最小のもの(切り上げ)を優先
             closest=$(echo "${same_minor_versions}" \
-                | awk -F. -v p="${req_patch}" '$3 >= p' \
+                | awk -v p="${req_patch}" '{
+                    ver = $0; sub(/^[ve]/, "", ver)
+                    split(ver, a, ".")
+                    if (a[3] >= p) print $0
+                  }' \
                 | head -1)
             # なければ同一マイナー内の最大パッチ(切り捨て)
             if [ -z "${closest}" ]; then
@@ -125,7 +148,11 @@ resolve_version() {
         # 2) 同一マイナーも存在しない: 同一メジャーの最新バージョンを使用
         if [ -z "${closest}" ]; then
             closest=$(echo "${all_versions}" \
-                | grep -P "^${req_major}\." \
+                | awk -v maj="${req_major}" '{
+                    ver = $0; sub(/^[ve]/, "", ver)
+                    split(ver, a, ".")
+                    if (a[1] == maj) print $0
+                  }' \
                 | tail -1)
         fi
 
@@ -149,20 +176,20 @@ resolve_version() {
 # EMQX 5.8 以降はリポジトリに env.sh が存在し正確なバージョンが記載される。
 # env.sh が存在しない (5.7以前) 場合は静的対応表にフォールバックする。
 #
+# $1: フルタグ名 (例: "v5.8.9", "e5.10.4", "6.2.0")
 # env.sh の OTP_VSN は "26.2.5.14-1" のようなビルド番号付き形式のため、
 # ハイフン以降を除去して純粋な OTP バージョン番号として扱う。
 # ================================================================
 get_build_versions_for_emqx() {
-    local emqx_ver="$1"
+    local full_tag="$1"
+    local emqx_ver
+    emqx_ver=$(strip_tag_prefix "${full_tag}")
     local major minor
     major=$(echo "${emqx_ver}" | cut -d. -f1)
     minor=$(echo "${emqx_ver}" | cut -d. -f2)
 
-    local git_tag
-    git_tag=$(get_git_tag "${emqx_ver}")
-
-    # env.sh からの取得を試みる
-    local env_sh_url="https://raw.githubusercontent.com/emqx/emqx/${git_tag}/env.sh"
+    # env.sh からの取得を試みる (フルタグをそのまま使用)
+    local env_sh_url="https://raw.githubusercontent.com/emqx/emqx/${full_tag}/env.sh"
     local env_content
     env_content=$(curl -sf "${env_sh_url}" 2>/dev/null || true)
 
@@ -204,23 +231,13 @@ get_build_versions_for_emqx() {
 }
 
 # ================================================================
-# git clone で使うタグ名を返す
-#   $1: EMQX バージョン (X.Y.Z)
-#
-# タグ形式の変遷:
-#   5.x  : "v5.8.9" (v プレフィックスあり)
-#   6.x+ : "6.1.1"  (プレフィックスなし)
+# フルタグ名 (例: "v5.8.9", "e5.10.4", "6.2.0") から
+# 純粋な X.Y.Z バージョン番号を返す  ※ OTP/Elixir バージョン判定用
+#   $1: フルタグ名
 # ================================================================
-get_git_tag() {
-    local emqx_ver="$1"
-    local major
-    major=$(echo "${emqx_ver}" | cut -d. -f1)
-
-    if [ "${major}" -ge 6 ]; then
-        echo "${emqx_ver}"
-    else
-        echo "v${emqx_ver}"
-    fi
+strip_tag_prefix() {
+    local tag="$1"
+    echo "${tag}" | sed 's/^[ve]//'
 }
 
 # ================================================================
@@ -383,16 +400,18 @@ default_install() {
 #   5.0–5.3 では ensure-rebar3.sh が存在しないため、この処理はスキップされる。
 # ================================================================
 source_build_install() {
-    local emqx_ver="$1"
+    local full_tag="$1"
+    local emqx_ver
+    emqx_ver=$(strip_tag_prefix "${full_tag}")
 
     # OTP / Elixir バージョンを取得 (スペース区切り: "OTP_VER ELIXIR_VER")
     local build_versions
-    build_versions=$(get_build_versions_for_emqx "${emqx_ver}")
+    build_versions=$(get_build_versions_for_emqx "${full_tag}")
     local otp_ver elixir_ver
     otp_ver=$(echo "${build_versions}" | cut -d' ' -f1)
     elixir_ver=$(echo "${build_versions}" | cut -d' ' -f2)
 
-    log "=== ソースビルド: EMQX ${emqx_ver} / OTP ${otp_ver} / Elixir ${elixir_ver:-なし} ==="
+    log "=== ソースビルド: EMQX ${full_tag} / OTP ${otp_ver} / Elixir ${elixir_ver:-なし} ==="
 
     # unixODBC → OTP → Elixir の順でビルド/インストール
     build_unixodbc "${DEFAULT_UNIXODBC_VERSION}"
@@ -407,16 +426,15 @@ source_build_install() {
     local src_dir="${PROGRAMS_DIR}/emqx-src-${emqx_ver}"
 
     if not_exist_directory "${src_dir}"; then
-        log "EMQX ${emqx_ver} のソースを取得中..."
-        local git_tag
-        git_tag=$(get_git_tag "${emqx_ver}")
+        log "EMQX ${full_tag} のソースを取得中..."
 
         # リリースタグはブランチとして存在しない場合があるため
         # git clone --branch の代わりに tarball を使用する
-        # 例: 6.2.0    → https://github.com/emqx/emqx/archive/refs/tags/6.2.0.tar.gz
-        #     v5.8.9   → https://github.com/emqx/emqx/archive/refs/tags/v5.8.9.tar.gz
-        #     e5.10.4  → https://github.com/emqx/emqx/archive/refs/tags/e5.10.4.tar.gz
-        local tarball_url="https://github.com/emqx/emqx/archive/refs/tags/${git_tag}.tar.gz"
+        # フルタグ名をそのまま使うことで v/e/プレフィックスなし全形式に対応:
+        #   6.2.0    → https://github.com/emqx/emqx/archive/refs/tags/6.2.0.tar.gz
+        #   v5.8.9   → https://github.com/emqx/emqx/archive/refs/tags/v5.8.9.tar.gz
+        #   e5.10.4  → https://github.com/emqx/emqx/archive/refs/tags/e5.10.4.tar.gz
+        local tarball_url="https://github.com/emqx/emqx/archive/refs/tags/${full_tag}.tar.gz"
         local tarball_file="${PROGRAMS_DIR}/emqx-${emqx_ver}.tar.gz"
 
         log "tarball をダウンロード中: ${tarball_url}"
