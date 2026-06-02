@@ -25,10 +25,6 @@ EMQX_FORK_REPO="https://github.com/BX293APEN/emqx.git"
 log()    { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 log_err(){ echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >&2; }
 
-not_exist_directory() {
-    [ ! -d "$1" ]
-}
-
 make_and_move_working_directory() {
     mkdir -p "${PROGRAMS_DIR}"
     cd "${PROGRAMS_DIR}"
@@ -254,20 +250,31 @@ build_unixodbc() {
 
     local src_dir="${PROGRAMS_DIR}/unixODBC-${unixodbc_ver}"
 
-    if not_exist_directory "${src_dir}"; then
-        local tarball="unixODBC-${unixodbc_ver}.tar.gz"
-        local primary_url="https://www.unixodbc.org/${tarball}"
-        local fallback_url="https://bx293apen.github.io/html/download/content/${tarball}"
-
-        # 公式サイトからダウンロード (タイムアウト60秒, 3リトライ)
-        log "unixODBC ${unixodbc_ver} をダウンロード中 (公式): ${primary_url}"
-        if ! wget -q --timeout=60 --tries=3 "${primary_url}"; then
-            log "公式からのダウンロード失敗。フォールバックを試みます: ${fallback_url}"
-            wget -q --timeout=60 --tries=3 "${fallback_url}" -O "${tarball}"
-        fi
-
-        tar -xzf "${tarball}"
+    # インストール完了の判定: odbc_config が存在し、バージョンが一致するか。
+    # 不一致(途中失敗・バージョン違い)の場合はソースを削除して再ビルドする。
+    local installed_ver
+    installed_ver=$(odbc_config --version 2>/dev/null || true)
+    if [ "${installed_ver}" = "${unixodbc_ver}" ]; then
+        log "unixODBC ${unixodbc_ver} は既にインストール済みです"
+        return
     fi
+    if [ -n "${installed_ver}" ]; then
+        log "unixODBC バージョン不一致 (インストール済み: ${installed_ver}, 要求: ${unixodbc_ver})。再ビルドします"
+    fi
+    [ -d "${src_dir}" ] && rm -rf "${src_dir}"
+
+    local tarball="unixODBC-${unixodbc_ver}.tar.gz"
+    local primary_url="https://www.unixodbc.org/${tarball}"
+    local fallback_url="https://bx293apen.github.io/html/download/content/${tarball}"
+
+    # 公式サイトからダウンロード (タイムアウト60秒, 3リトライ)
+    log "unixODBC ${unixodbc_ver} をダウンロード中 (公式): ${primary_url}"
+    if ! wget -q --timeout=60 --tries=3 "${primary_url}"; then
+        log "公式からのダウンロード失敗。フォールバックを試みます: ${fallback_url}"
+        wget -q --timeout=60 --tries=3 "${fallback_url}" -O "${tarball}"
+    fi
+
+    tar -xzf "${tarball}"
 
     cd "${src_dir}"
     ./configure --quiet
@@ -471,8 +478,16 @@ source_build_install() {
 
     cd "${PROGRAMS_DIR}"
     local src_dir="${PROGRAMS_DIR}/emqx-src-${emqx_ver}"
+    local emqx_bin="${src_dir}/_build/emqx-enterprise/rel/emqx/bin/emqx"
 
-    if not_exist_directory "${src_dir}"; then
+    # ビルド完了の判定: emqx バイナリが存在するかどうか。
+    # src_dir だけ存在してバイナリがない = 途中失敗。その場合は src_dir を削除して再ビルドする。
+    if [ -d "${src_dir}" ] && [ ! -f "${emqx_bin}" ]; then
+        log "不完全なビルドディレクトリを検出。削除して再ビルドします: ${src_dir}"
+        rm -rf "${src_dir}"
+    fi
+
+    if [ ! -f "${emqx_bin}" ]; then
         log "EMQX ${full_tag} のソースを取得中..."
 
         # リリースタグはブランチとして存在しない場合があるため
@@ -507,6 +522,8 @@ source_build_install() {
         export BUILD_WITH_QUIC=1
         CC=gcc-12 CXX=g++-12 make
         chmod -R 777 _build/emqx-enterprise/rel/emqx/data/
+    else
+        log "EMQX ${full_tag} は既にビルド済みです: ${emqx_bin}"
     fi
 
     local emqx_root="${src_dir}/_build/emqx-enterprise/rel/emqx"
