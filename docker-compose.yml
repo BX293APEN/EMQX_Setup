@@ -32,6 +32,7 @@ services:                                   # 作成したいコンテナを列�
     environment:                            # コンテナ内の環境変数を設定
       - TZ=${TIME_ZONE}
       - LANG=${LANG}
+      - EMQX_VERSION=${VERSION}             # start.sh へバージョン指定を渡す
     
     ports:                                  # ポートを接続
       - "18083:18083"                       # ホストマシンのポート番号:コンテナのポート番号
