@@ -9,9 +9,9 @@ set -euo pipefail
 #                          OTP 27.2.3 + unixODBC 2.3.12 で動作確認済み構成
 #
 #   Latest               : GitHub から最新タグを取得し
-#                          公式ビルド済みパッケージをインストール
+#                          ソースビルドでインストール
 #
-#   X.Y.Z                : 指定バージョンの公式パッケージをインストール
+#   X.Y.Z                : 指定バージョンをソースビルドでインストール
 #                          タグが存在しない場合は Default にフォールバック
 # ================================================================
 
@@ -36,6 +36,19 @@ make_and_move_working_directory() {
 
 # ================================================================
 # バージョン解決
+#
+# タグ形式の変遷:
+#   EMQX 5.x (open source)  : v5.8.9  (v プレフィックスあり)
+#   EMQX 5.x (enterprise)   : e5.8.9  (e プレフィックスあり)
+#   EMQX 6.x                : 6.1.1   (プレフィックスなし)
+#
+# Latest 取得ロジック:
+#   全タグから上記3形式の X.Y.Z 部分を抽出し semver 比較で最大値を返す。
+#   これにより v5.x / e5.x / 6.x が混在しても正しく最新を選択できる。
+#
+# ※ 旧実装の問題:
+#   grep -oP 'refs/tags/v\K...' は v プレフィックスのタグしか抽出できず、
+#   6.x 系タグ (例: 6.1.1) がヒットしないため Latest=5.8.9 と誤検出していた。
 # ================================================================
 resolve_version() {
     local ver="${EMQX_VERSION:-Default}"
@@ -47,9 +60,11 @@ resolve_version() {
 
     if [ "${ver}" = "Latest" ]; then
         local latest
-        latest=$(git ls-remote --tags --sort="-v:refname" "${EMQX_OFFICIAL_REPO}" \
-                 | grep -oP 'refs/tags/v\K[0-9]+\.[0-9]+\.[0-9]+$' \
-                 | head -1)
+        # v5.x.x / e5.x.x / 6.x.x の3形式すべてから X.Y.Z を抽出して最大値を得る
+        latest=$(git ls-remote --tags "${EMQX_OFFICIAL_REPO}" \
+                 | grep -oP 'refs/tags/(v|e)?\K[0-9]+\.[0-9]+\.[0-9]+$' \
+                 | sort -t. -k1,1n -k2,2n -k3,3n \
+                 | tail -1)
         if [ -z "${latest}" ]; then
             log_err "最新バージョンの取得に失敗しました。Default にフォールバックします。"
             echo "Default"
@@ -61,8 +76,12 @@ resolve_version() {
 
     # X.Y.Z 形式チェック
     if echo "${ver}" | grep -qP '^\d+\.\d+\.\d+$'; then
+        # v プレフィックス / e プレフィックス / プレフィックスなし の3パターンを検索
         local tag_exists
-        tag_exists=$(git ls-remote --tags "${EMQX_OFFICIAL_REPO}" "refs/tags/v${ver}" \
+        tag_exists=$(git ls-remote --tags "${EMQX_OFFICIAL_REPO}" \
+                     "refs/tags/v${ver}" \
+                     "refs/tags/e${ver}" \
+                     "refs/tags/${ver}" \
                      | wc -l)
         if [ "${tag_exists}" -gt 0 ]; then
             echo "${ver}"
@@ -80,15 +99,16 @@ resolve_version() {
 # ================================================================
 # EMQX バージョンに対応する OTP バージョンを返す
 #
-# 対応表:
+# 対応表 (EMQX 公式 .tool-versions / リリースノート準拠):
 #   5.0–5.1  : OTP 24.x  → 24.3.4.17
 #   5.2–5.3  : OTP 25.x  → 25.3.2.20
 #   5.4–5.10 : OTP 26.x  → 26.2.5.14
 #   6.0      : OTP 27.x  → 27.3.4
 #   6.1+     : OTP 28.x  → 28.0
+#     ※ EMQX 6.1.0 リリースノート #16368 にて OTP27→OTP28 移行が明記されている
 #
 # 公式パッケージは OTP を同梱するためこの関数は使わない。
-# ソースビルド時 (default_install / source_build_install) に使用する。
+# ソースビルド時 (source_build_install) に使用する。
 # ================================================================
 get_otp_version_for_emqx() {
     local emqx_ver="$1"
@@ -102,13 +122,33 @@ get_otp_version_for_emqx() {
         else                            echo "26.2.5.14"
         fi
     elif [ "${major}" -eq 6 ]; then
-        if [ "${minor}" -eq 0 ]; then echo "27.3.4"
-        else                          echo "28.0"
+        if   [ "${minor}" -eq 0 ]; then echo "27.3.4"
+        else                            echo "28.0"
         fi
     else
         # 未知のメジャーバージョンは最新の確認済み OTP を使う
         log_err "未知のメジャーバージョン ${major}。OTP 28.0 を使用します。"
         echo "28.0"
+    fi
+}
+
+# ================================================================
+# git clone で使うタグ名を返す
+#   $1: EMQX バージョン (X.Y.Z)
+#
+# タグ形式の変遷:
+#   5.x  : "v5.8.9" (v プレフィックスあり)
+#   6.x+ : "6.1.1"  (プレフィックスなし)
+# ================================================================
+get_git_tag() {
+    local emqx_ver="$1"
+    local major
+    major=$(echo "${emqx_ver}" | cut -d. -f1)
+
+    if [ "${major}" -ge 6 ]; then
+        echo "${emqx_ver}"
+    else
+        echo "v${emqx_ver}"
     fi
 }
 
@@ -174,7 +214,7 @@ build_otp() {
 }
 
 # ================================================================
-# Default: フォーク版 EMQX をソースビルド
+# Default: フォーク版 EMQX をソースビルド  ※ 動作を一切変更しない
 #
 # OTP 27.2.3 + unixODBC 2.3.12 + BX293APEN フォークの組み合わせが
 # 動作確認済みのため、汎用化せずこの構成を固定で維持する。
@@ -210,74 +250,27 @@ default_install() {
 }
 
 # ================================================================
-# 公式パッケージインストール
-#   $1: EMQX バージョン (X.Y.Z)
-#
-# 公式リリースは OTP を同梱した tar.gz パッケージを提供しているため
-# OTP・unixODBC のソースビルドは不要。
-# パッケージが見つからない場合は source_build_install にフォールバックする。
-#
-# URL 形式:
-#   https://github.com/emqx/emqx/releases/download/vX.Y.Z/
-#     emqx-enterprise-X.Y.Z-ubuntu{distro}-amd64.tar.gz
-# Ubuntu 25.04 向けビルドが存在しない場合は 24.04 → 22.04 へフォールバック。
-# ================================================================
-install_official_package() {
-    local emqx_ver="$1"
-    log "=== 公式パッケージインストール: EMQX ${emqx_ver} ==="
-
-    cd "${PROGRAMS_DIR}"
-
-    local install_dir="${PROGRAMS_DIR}/emqx-${emqx_ver}"
-
-    if not_exist_directory "${install_dir}"; then
-        local pkg_file=""
-        local dl_url=""
-
-        for distro in "ubuntu25.04" "ubuntu24.04" "ubuntu22.04"; do
-            local candidate_file="emqx-enterprise-${emqx_ver}-${distro}-amd64.tar.gz"
-            local candidate_url="https://github.com/emqx/emqx/releases/download/v${emqx_ver}/${candidate_file}"
-            log "パッケージ URL を確認中: ${candidate_url}"
-            if wget -q --spider "${candidate_url}" 2>/dev/null; then
-                pkg_file="${candidate_file}"
-                dl_url="${candidate_url}"
-                log "利用可能: ${candidate_url}"
-                break
-            fi
-        done
-
-        if [ -z "${dl_url}" ]; then
-            log_err "EMQX ${emqx_ver} の Ubuntu パッケージが見つかりませんでした。ソースビルドにフォールバックします。"
-            # パッケージが存在しないバージョンはソースビルドで対応する。
-            # default_install (フォーク固定) ではなく、指定バージョンに合わせた
-            # OTP を選択してソースビルドする。
-            source_build_install "${emqx_ver}"
-            return
-        fi
-
-        log "ダウンロード中: ${dl_url}"
-        wget -q "${dl_url}" -O "${pkg_file}"
-        mkdir -p "${install_dir}"
-        tar -xzf "${pkg_file}" -C "${install_dir}" --strip-components=1
-        rm -f "${pkg_file}"
-    fi
-
-    setup_config_and_certs "${install_dir}"
-
-    log "EMQX ${emqx_ver} 起動中..."
-    "${install_dir}/bin/emqx" start
-    log "=== 公式パッケージインストール完了 ==="
-}
-
-# ================================================================
 # ソースビルドインストール (バージョン指定)
 #   $1: EMQX バージョン (X.Y.Z)
 #
-# install_official_package のフォールバック先。
+# Latest / X.Y.Z 指定時のビルド先。
 # get_otp_version_for_emqx で指定 EMQX に対応する OTP を選択し
 # 公式リポジトリからソースをビルドする。
 # unixODBC は OTP の ODBC アプリが要求するインターフェースが
 # 2.3.x 系で安定しているため、バージョンに関わらず 2.3.12 を使用する。
+#
+# ensure-rebar3.sh について:
+#   EMQX 5.4 以降はリポジトリ内に scripts/ensure-rebar3.sh が含まれており、
+#   これを使って EMQX 専用バージョンの rebar3 を取得する必要がある。
+#   システムの rebar3 (apt でインストール済み) を使うと依存プラグインの
+#   バージョン互換性エラーが発生する場合があるため、スクリプトが存在する場合は
+#   必ず ensure-rebar3.sh を先に実行してから make を呼ぶこと。
+#   5.0–5.3 では ensure-rebar3.sh が存在しないため、この処理はスキップされる。
+#
+# コンパイラについて:
+#   emqx-builder (公式 CI イメージ) は特定の gcc バージョンを強制していない
+#   (Ubuntu 18.04 + OTP24 の特殊ケースを除く)。
+#   Default ビルドに合わせて CC=gcc-12 CXX=g++-12 を使用する。
 # ================================================================
 source_build_install() {
     local emqx_ver="$1"
@@ -295,8 +288,18 @@ source_build_install() {
 
     if not_exist_directory "${src_dir}"; then
         log "EMQX v${emqx_ver} をクローン中..."
-        git clone --depth 1 --branch "v${emqx_ver}" "${EMQX_OFFICIAL_REPO}" "${src_dir}"
+        local git_tag
+        git_tag=$(get_git_tag "${emqx_ver}")
+        git clone --depth 1 --branch "${git_tag}" "${EMQX_OFFICIAL_REPO}" "${src_dir}"
         cd "${src_dir}"
+
+        # ensure-rebar3.sh が存在する場合は専用 rebar3 を取得してから make する
+        # (EMQX 5.4 以降に含まれる。存在しない場合は apt インストール済みを使用)
+        if [ -f "scripts/ensure-rebar3.sh" ]; then
+            log "ensure-rebar3.sh を実行して専用 rebar3 を取得します..."
+            bash scripts/ensure-rebar3.sh
+        fi
+
         export BUILD_WITH_QUIC=1
         CC=gcc-12 CXX=g++-12 make
         chmod -R 777 _build/emqx-enterprise/rel/emqx/data/
@@ -382,7 +385,7 @@ log "==> EMQX_VERSION=${EMQX_VERSION:-Default}  resolved=${RESOLVED_VERSION}"
 if [ "${RESOLVED_VERSION}" = "Default" ]; then
     default_install
 else
-    install_official_package "${RESOLVED_VERSION}"
+    source_build_install "${RESOLVED_VERSION}"
 fi
 
 # コンテナをフォアグラウンドで維持
