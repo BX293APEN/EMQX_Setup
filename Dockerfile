@@ -55,7 +55,8 @@ RUN apt install -y \
     pkg-config \
     libonig-dev \
     ruby \
-    unixodbc-dev && \
+    unixodbc-dev \
+    protobuf-compiler && \
     rebar3 update
 
 # USER ${USER_NAME}
