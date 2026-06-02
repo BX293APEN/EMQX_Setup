@@ -355,6 +355,39 @@ install_elixir() {
 }
 
 # ================================================================
+# Rust (rustup) インストール  ※ ソースビルドルート専用
+#
+# datalayers-adapter-erl は Rust で書かれた NIF を含み、
+# Ubuntu 25.04 向けのプリビルドバイナリが存在しない。
+# そのためソースからビルドする必要があるが、
+# crates/datalayers-adapter-nif/Cargo.toml が edition = "2024" を使用しており
+# Rust 1.85.0 以上が必要。
+# Ubuntu 25.04 の apt 版 rustc は 1.84.0 のため要件を満たさず、
+# rustup 経由で最新安定版をインストールする。
+#
+# 既にインストール済みの場合は rustup update のみ実行する。
+# ================================================================
+install_rust() {
+    log "=== Rust (rustup) のセットアップ ==="
+
+    if command -v rustup &>/dev/null; then
+        log "rustup 既存インストールを更新中..."
+        rustup update stable --no-self-update
+    else
+        log "rustup をインストール中..."
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain stable --no-modify-path
+    fi
+
+    # PATH に追加 (既に追加済みでも冪等)
+    export PATH="${HOME}/.cargo/bin:${PATH}"
+
+    local rust_ver
+    rust_ver=$(rustc --version 2>/dev/null || true)
+    log "Rust セットアップ完了: ${rust_ver}"
+}
+
+# ================================================================
 # Default: フォーク版 EMQX をソースビルド  ※ 動作を一切変更しない
 #
 # OTP 27.2.3 + unixODBC 2.3.12 + BX293APEN フォークの組み合わせが
@@ -423,7 +456,7 @@ source_build_install() {
 
     log "=== ソースビルド: EMQX ${full_tag} / OTP ${otp_ver} / Elixir ${elixir_ver:-なし} ==="
 
-    # unixODBC → OTP → Elixir の順でビルド/インストール
+    # unixODBC → OTP → Elixir → Rust の順でビルド/インストール
     build_unixodbc "${DEFAULT_UNIXODBC_VERSION}"
     build_otp "${otp_ver}"
 
@@ -431,6 +464,10 @@ source_build_install() {
     if [ -n "${elixir_ver}" ]; then
         install_elixir "${elixir_ver}" "${otp_ver}"
     fi
+
+    # datalayers NIF は Rust 1.85+(edition 2024) が必要。
+    # Ubuntu 25.04 の apt 版 rustc は 1.84 のため rustup で最新安定版を用意する。
+    install_rust
 
     cd "${PROGRAMS_DIR}"
     local src_dir="${PROGRAMS_DIR}/emqx-src-${emqx_ver}"
