@@ -23,7 +23,7 @@ EMQX_FORK_REPO="https://github.com/BX293APEN/emqx.git"
 # ユーティリティ
 # ================================================================
 log()    { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
-log_err(){ echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: $*" >&2; }
+log_err(){ echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >&2; }
 
 not_exist_directory() {
     [ ! -d "$1" ]
@@ -453,6 +453,10 @@ source_build_install() {
             bash scripts/ensure-rebar3.sh
         fi
 
+        # tarball 展開のため .git が存在しない。
+        # pkg-vsn.sh は git describe でバージョンを取得しようとするが、
+        # PKG_VSN 環境変数が設定されていれば git を呼ばずに即返す仕様になっている。
+        export PKG_VSN="${emqx_ver}"
         export BUILD_WITH_QUIC=1
         CC=gcc-12 CXX=g++-12 make
         chmod -R 777 _build/emqx-enterprise/rel/emqx/data/
