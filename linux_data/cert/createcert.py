@@ -105,10 +105,15 @@ class CreateCACert():
             not_valid_after     = datetime.now(timezone.utc) + timedelta(days=int(365 * self.expire)),
             public_key          = self.key.public_key(),
         )
-        self.ip = x509.IPAddress(ipaddress.IPv4Address(self.host))
+        # self.host がIPアドレス(v4/v6)であればIPAddress、FQDNであればDNSName としてSANに追加する
+        try:
+            san_entry = x509.IPAddress(ipaddress.ip_address(self.host))
+        except ValueError:
+            san_entry = x509.DNSName(self.host)
+
         self.cert = self.cert.add_extension(
             x509.SubjectAlternativeName(
-                [self.ip]
+                [san_entry]
             ),
             critical=False,
         )
@@ -212,94 +217,86 @@ class CreateCACert():
         return self.caCertKey
 
 
-# ------------------------------------------------------------------ #
-#  対話モード用ヘルパー
-# ------------------------------------------------------------------ #
-
-def _prompt(label: str, default: str) -> str:
-    """入力プロンプト。空Enterでデフォルト値を返す。"""
-    val = input(f"  {label} [{default}]: ").strip()
-    return val if val else default
-
-
-def _prompt_int(label: str, default: int, min_val: int = 1, max_val: int = 100) -> int:
-    """整数入力。範囲外またはEnterでデフォルト値を返す。"""
-    while True:
-        raw = input(f"  {label} [{default}]: ").strip()
-        if not raw:
-            return default
-        try:
-            val = int(raw)
-            if min_val <= val <= max_val:
+def formatted_prompt(
+    message : str,
+    default,
+):
+    if (type(default) is str):
+        val = input(f"{message} [{default}]: ").strip()
+        return val if val else default
+    elif (type(default) is bool):
+        default_str = "y" if default else "n"
+        while True:
+            raw = input(f"{message} [{default_str}] [y/n]:").strip().lower()
+            if not raw:
+                return default
+            if raw in ("y", "yes"):
+                return True
+            if raw in ("n", "no"):
+                return False
+            print(f"[{raw}] is not [y/n]")
+    elif (type(default) is int):
+        while True:
+            raw = input(f"{message} [{default}]: ").strip()
+            if not raw:
+                return default
+            try:
+                val = int(raw)
                 return val
-            print(f"    ※ {min_val}〜{max_val} の範囲で入力してください")
-        except ValueError:
-            print("    ※ 数値を入力してください")
+            except ValueError:
+                print(f"[{raw}] is not [int]")
+    
 
-
-def _prompt_bool(label: str, default: bool) -> bool:
-    """y/n 入力。"""
-    default_str = "y" if default else "n"
-    while True:
-        raw = input(f"  {label} [{'y/N' if not default else 'Y/n'}]: ").strip().lower()
-        if not raw:
-            return default
-        if raw in ("y", "yes"):
-            return True
-        if raw in ("n", "no"):
-            return False
-        print("    ※ y または n で入力してください")
 
 
 def interactive_mode():
-    """対話モード: 各パラメータをユーザーに確認しながら証明書を生成する。"""
     print("=" * 60)
-    print("  自己証明書 対話生成モード")
-    print("  ※ Enterでデフォルト値を使用します")
+    print(f"{' '*2}自己証明書 対話生成モード")
+    print(f"{' '*2}Enterでデフォルト値を使用します")
     print("=" * 60)
 
     # --- ファイル名 ---
     print("\n[出力ファイル名]")
-    cert_file       = _prompt("サーバ証明書ファイル名",  "certificate.crt")
-    private_file    = _prompt("サーバ秘密鍵ファイル名",  "private.key")
-    ca_cert_file    = _prompt("CA証明書ファイル名",      "ca_cert.crt")
-    ca_private_file = _prompt("CA秘密鍵ファイル名",      "ca_private.key")
+    cert_file           = formatted_prompt(f"{' '*2}サーバ証明書ファイル名",  "certificate.crt")
+    private_file        = formatted_prompt(f"{' '*2}サーバ秘密鍵ファイル名",  "private.key")
+    ca_cert_file        = formatted_prompt(f"{' '*2}CA証明書ファイル名",      "ca_cert.crt")
+    ca_private_file     = formatted_prompt(f"{' '*2}CA秘密鍵ファイル名",      "ca_private.key")
 
     # --- 証明書の属性 ---
     print("\n[証明書の属性]")
-    country    = _prompt("国コード (2文字)",        "JP")
-    prefecture = _prompt("都道府県",                "Aichi")
-    city       = _prompt("市区町村",                "Nagoya")
-    org        = _prompt("組織名",                  "University")
-    ca_host    = _prompt("CA の CommonName",        "BX293A_PEN")
+    country             = formatted_prompt(f"{' '*2}国コード (2文字)",        "JP")
+    prefecture          = formatted_prompt(f"{' '*2}都道府県",                "Aichi")
+    city                = formatted_prompt(f"{' '*2}市区町村",                "Nagoya")
+    org                 = formatted_prompt(f"{' '*2}組織名",                  "University")
+    ca_host             = formatted_prompt(f"{' '*2}CA の CommonName",        "BX293A_PEN")
 
     # --- サーバ ---
     print("\n[サーバ設定]")
-    host    = _prompt("サーバIPアドレス (SAN含む)", "127.0.0.1")
-    expire  = _prompt_int("有効期限 (年)",           10, min_val=1, max_val=99)
+    host                = formatted_prompt(f"{' '*2}サーバIPアドレス (SAN含む)", "127.0.0.1")
+    expire              = formatted_prompt(f"{' '*2}有効期限 (年)",           10,)
 
     # --- 上書き ---
     print("\n[その他]")
-    overwrite = _prompt_bool("既存証明書を上書きする?", False)
+    overwrite           = formatted_prompt(f"{' '*2}既存証明書を上書きする?", False)
 
     # --- 確認 ---
     print("\n" + "=" * 60)
-    print("  以下の設定で生成します:")
-    print(f"    サーバ証明書  : {cert_file}")
-    print(f"    サーバ秘密鍵  : {private_file}")
-    print(f"    CA証明書      : {ca_cert_file}")
-    print(f"    CA秘密鍵      : {ca_private_file}")
-    print(f"    国コード      : {country}")
-    print(f"    都道府県      : {prefecture}")
-    print(f"    市区町村      : {city}")
-    print(f"    組織名        : {org}")
-    print(f"    CA CommonName : {ca_host}")
-    print(f"    サーバIP(SAN) : {host}")
-    print(f"    有効期限      : {expire} 年")
-    print(f"    上書き        : {'する' if overwrite else 'しない'}")
+    print(f"{' '*2}以下の設定で生成します:")
+    print(f"{' '*2}{' '*2}{'サーバ証明書':<20}: {cert_file}")
+    print(f"{' '*2}{' '*2}{'サーバ秘密鍵':<20}: {private_file}")
+    print(f"{' '*2}{' '*2}{'CA証明書':<20}: {ca_cert_file}")
+    print(f"{' '*2}{' '*2}{'CA秘密鍵':<20}: {ca_private_file}")
+    print(f"{' '*2}{' '*2}{'国コード':<20}: {country}")
+    print(f"{' '*2}{' '*2}{'都道府県':<20}: {prefecture}")
+    print(f"{' '*2}{' '*2}{'市区町村':<20}: {city}")
+    print(f"{' '*2}{' '*2}{'組織名':<20}: {org}")
+    print(f"{' '*2}{' '*2}{'CA CommonName':<20}: {ca_host}")
+    print(f"{' '*2}{' '*2}{'サーバIP(SAN)':<20}: {host}")
+    print(f"{' '*2}{' '*2}{'有効期限':<20}: {expire} 年")
+    print(f"{' '*2}{' '*2}{'上書き':<20}: {'する' if overwrite else 'しない'}")
     print("=" * 60)
 
-    if not _prompt_bool("実行しますか?", True):
+    if not formatted_prompt("実行しますか?", True):
         print("キャンセルしました。")
         return
 
@@ -319,14 +316,11 @@ def interactive_mode():
         org              = org,
     )
     print("完了しました。")
-    print(f"  {cert_file} / {private_file} / {ca_cert_file} / {ca_private_file}")
+    print(f"{cert_file} / {private_file} / {ca_cert_file} / {ca_private_file}")
 
 
 if __name__ == "__main__":
     import sys
-
-    # 引数なし → 対話モード
-    # --default  → 現在の設定(デフォルト値)で非対話実行
     if len(sys.argv) >= 2 and sys.argv[1] == "--default":
         print("デフォルト設定で証明書を生成します...")
         CreateCACert(
