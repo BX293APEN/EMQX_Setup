@@ -23,6 +23,11 @@ log {
     }
 }
 
+mqtt {
+    server_keepalive = 600
+    keepalive_multiplier = 10.0
+}
+
 listeners.quic.default {
     enabled = true
     bind = "0.0.0.0:19080"
@@ -37,5 +42,4 @@ listeners.quic.default {
         # handshake_idle_timeout = 120s
     }
     # idle_timeout = 120s
-    server_keepalive = 600
 }
