@@ -37,4 +37,5 @@ listeners.quic.default {
         # handshake_idle_timeout = 120s
     }
     # idle_timeout = 120s
+    server_keepalive = 600
 }
